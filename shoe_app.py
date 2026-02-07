@@ -172,4 +172,115 @@ def admin_dashboard():
         FROM shoes s
         LEFT JOIN votes v ON s.id = v.shoe_id
         GROUP BY s.id
-        ORDER BY favs
+        ORDER BY favs DESC, ups DESC
+        LIMIT 10
+        """
+        stats = pd.read_sql(query, conn)
+        conn.close()
+        
+        if not stats.empty:
+            st.dataframe(stats)
+            st.bar_chart(stats.set_index('id')['ups'])
+        else:
+            st.info("No data yet.")
+
+# --- FOLKS PAGE ---
+def folks_gallery():
+    user = st.session_state['user_id']
+    st.title("👟 Shoe Voting Gallery")
+    
+    with st.expander("ℹ️ Click for Help"):
+        st.markdown("Use **👍 (Like)** for good shoes and **❤️ (Favorite)** for the BEST one.")
+
+    conn = get_db()
+    
+    # Get User Status
+    my_votes = pd.read_sql("SELECT * FROM votes WHERE user_email = ?", conn, params=(user,))
+    my_ups = my_votes[my_votes['upvoted'] == 1]['shoe_id'].tolist()
+    fav_row = my_votes[my_votes['is_favorite'] == 1]
+    my_fav_id = fav_row.iloc[0]['shoe_id'] if not fav_row.empty else None
+
+    # Get Shoes Sorted
+    query = """
+    SELECT s.id, s.filename, 
+           COALESCE(SUM(v.is_favorite), 0) as total_favs,
+           COALESCE(SUM(v.upvoted), 0) as total_ups
+    FROM shoes s
+    LEFT JOIN votes v ON s.id = v.shoe_id
+    GROUP BY s.id
+    ORDER BY total_favs DESC, total_ups DESC, s.id ASC
+    """
+    shoes = pd.read_sql(query, conn)
+    conn.close()
+
+    if shoes.empty:
+        st.warning("Gallery is empty.")
+        return
+
+    cols = st.columns(3)
+    for idx, row in shoes.iterrows():
+        sid = row['id']
+        fname = row['filename']
+        img_path = os.path.join(IMAGE_FOLDER, fname)
+        
+        # Calculate State
+        is_up = sid in my_ups
+        is_fav = (sid == my_fav_id)
+        
+        with cols[idx % 3]:
+            st.container(border=True)
+            if os.path.exists(img_path):
+                st.image(img_path, use_container_width=True)
+            else:
+                st.error("Image not found")
+            
+            st.caption(f"Shoe #{sid}")
+            c1, c2 = st.columns(2)
+            
+            if c1.button(f"{'👍 Liked' if is_up else '👍 Like'}", key=f"u_{sid}", type="primary" if is_up else "secondary", use_container_width=True):
+                toggle_upvote(user, sid, 1 if is_up else 0)
+                
+            if c2.button(f"{'❤️ Fav' if is_fav else '🤍 Fav'}", key=f"f_{sid}", type="primary" if is_fav else "secondary", use_container_width=True):
+                handle_favorite_click(user, sid, my_fav_id)
+
+# --- LOGIN & MAIN ---
+def login():
+    st.markdown("<h1 style='text-align: center;'>👟 The Shoe Poll</h1>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1,2,1])
+    with c2:
+        with st.container(border=True):
+            tabs = st.tabs(["Voter", "Admin"])
+            with tabs[0]:
+                name = st.text_input("Name")
+                email = st.text_input("Email")
+                if st.button("Enter"):
+                    if name and email:
+                        st.session_state.update({'user_role': 'folk', 'user_id': email, 'user_name': name})
+                        st.rerun()
+            with tabs[1]:
+                if st.button("Login (AK1130)"): # Simplified for speed
+                    # In real usage, uncomment text inputs below
+                    # aid = st.text_input("ID") 
+                    # apass = st.text_input("Pass", type="password")
+                    # if aid == "AK1130" and apass == "3110":
+                    st.session_state.update({'user_role': 'admin', 'user_id': 'ADMIN', 'user_name': 'Admin'})
+                    st.rerun()
+
+def main():
+    init_db()
+    if 'user_role' not in st.session_state:
+        login()
+    else:
+        with st.sidebar:
+            st.write(f"User: **{st.session_state.get('user_name')}**")
+            if st.button("Logout"):
+                st.session_state.clear()
+                st.rerun()
+        
+        if st.session_state['user_role'] == 'admin':
+            admin_dashboard()
+        else:
+            folks_gallery()
+
+if __name__ == "__main__":
+    main()
