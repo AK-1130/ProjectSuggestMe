@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import os
 import shutil
+import io
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Shoe Selection Pro", layout="wide")
@@ -14,6 +15,20 @@ ITEMS_PER_PAGE = 10
 if not os.path.exists(IMAGE_FOLDER):
     os.makedirs(IMAGE_FOLDER)
 
+# --- CSS FOR STANDARDIZED TILES ---
+st.markdown("""
+    <style>
+    div[data-testid="stImage"] > img {
+        height: 250px;  /* Fixed height for all images */
+        width: 100%;
+        object-fit: contain; /* Ensures image fits without stretching */
+    }
+    .stButton button {
+        width: 100%;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- DATABASE MANAGEMENT ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -24,6 +39,7 @@ def init_db():
     
     c.execute('''CREATE TABLE IF NOT EXISTS votes 
                  (user_email TEXT, 
+                  user_name TEXT,
                   shoe_id INTEGER, 
                   upvoted INTEGER DEFAULT 0, 
                   is_favorite INTEGER DEFAULT 0, 
@@ -40,12 +56,9 @@ def save_uploaded_files(uploaded_files):
     c = conn.cursor()
     count = 0
     for uploaded_file in uploaded_files:
-        # Save file to disk
         file_path = os.path.join(IMAGE_FOLDER, uploaded_file.name)
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
-            
-        # Add to DB
         c.execute("INSERT INTO shoes (filename) VALUES (?)", (uploaded_file.name,))
         count += 1
     conn.commit()
@@ -59,113 +72,106 @@ def delete_shoe(shoe_id, filename):
     c.execute("DELETE FROM votes WHERE shoe_id = ?", (shoe_id,))
     conn.commit()
     conn.close()
-    
     try:
-        file_path = os.path.join(IMAGE_FOLDER, filename)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-    except Exception as e:
-        st.error(f"Error deleting file: {e}")
+        os.remove(os.path.join(IMAGE_FOLDER, filename))
+    except:
+        pass
 
-def delete_all_shoes():
+def delete_all_images():
     conn = get_db()
     c = conn.cursor()
-    # Clear Tables
     c.execute("DELETE FROM shoes")
-    c.execute("DELETE FROM votes")
-    # Reset ID counters
-    c.execute("DELETE FROM sqlite_sequence WHERE name='shoes'")
+    c.execute("DELETE FROM votes") # Optional: clear votes if images are gone
     conn.commit()
     conn.close()
     
-    # Clear Folder
+    # Delete files
     for filename in os.listdir(IMAGE_FOLDER):
         file_path = os.path.join(IMAGE_FOLDER, filename)
         try:
             if os.path.isfile(file_path) or os.path.islink(file_path):
                 os.unlink(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
         except Exception as e:
             st.error(f"Failed to delete {file_path}. Reason: {e}")
 
+def delete_user_response(user_email):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM votes WHERE user_email = ?", (user_email,))
+    conn.commit()
+    conn.close()
+
 # --- VOTING LOGIC ---
 @st.dialog("Change Favorite Shoe?")
-def confirm_switch_favorite(user_email, new_shoe_id, old_shoe_id):
+def confirm_switch_favorite(user_email, user_name, new_shoe_id, old_shoe_id):
     st.write(f"You have a favorite (Shoe #{old_shoe_id}). Switch to this one?")
     col1, col2 = st.columns(2)
     if col1.button("Yes, Switch"):
         conn = get_db()
         c = conn.cursor()
         c.execute("UPDATE votes SET is_favorite = 0 WHERE user_email = ? AND shoe_id = ?", (user_email, old_shoe_id))
-        c.execute("""INSERT INTO votes (user_email, shoe_id, is_favorite) VALUES (?, ?, 1)
-                     ON CONFLICT(user_email, shoe_id) DO UPDATE SET is_favorite = 1""", (user_email, new_shoe_id))
+        c.execute("""INSERT INTO votes (user_email, user_name, shoe_id, is_favorite) VALUES (?, ?, ?, 1)
+                     ON CONFLICT(user_email, shoe_id) DO UPDATE SET is_favorite = 1""", (user_email, user_name, new_shoe_id))
         conn.commit()
         conn.close()
         st.rerun()
     if col2.button("No"):
         st.rerun()
 
-def toggle_upvote(user_email, shoe_id, current_status):
+def toggle_upvote(user_email, user_name, shoe_id, current_status):
     new_status = 0 if current_status == 1 else 1
     conn = get_db()
     c = conn.cursor()
-    c.execute("""INSERT INTO votes (user_email, shoe_id, upvoted) VALUES (?, ?, ?)
+    c.execute("""INSERT INTO votes (user_email, user_name, shoe_id, upvoted) VALUES (?, ?, ?, ?)
                  ON CONFLICT(user_email, shoe_id) DO UPDATE SET upvoted = ?""",
-              (user_email, shoe_id, new_status, new_status))
+              (user_email, user_name, shoe_id, new_status, new_status))
     conn.commit()
     conn.close()
     st.rerun()
 
-def handle_favorite_click(user_email, shoe_id, current_fav_id):
+def handle_favorite_click(user_email, user_name, shoe_id, current_fav_id):
     conn = get_db()
     c = conn.cursor()
-    if current_fav_id == shoe_id: # Un-favorite
+    if current_fav_id == shoe_id: 
         c.execute("UPDATE votes SET is_favorite = 0 WHERE user_email = ? AND shoe_id = ?", (user_email, shoe_id))
         conn.commit()
         conn.close()
         st.rerun()
-    elif current_fav_id is None: # New favorite
-        c.execute("""INSERT INTO votes (user_email, shoe_id, is_favorite) VALUES (?, ?, 1)
-                     ON CONFLICT(user_email, shoe_id) DO UPDATE SET is_favorite = 1""", (user_email, shoe_id))
+    elif current_fav_id is None: 
+        c.execute("""INSERT INTO votes (user_email, user_name, shoe_id, is_favorite) VALUES (?, ?, ?, 1)
+                     ON CONFLICT(user_email, shoe_id) DO UPDATE SET is_favorite = 1""", (user_email, user_name, shoe_id))
         conn.commit()
         conn.close()
         st.rerun()
-    else: # Switch favorite
+    else: 
         conn.close()
-        confirm_switch_favorite(user_email, shoe_id, current_fav_id)
+        confirm_switch_favorite(user_email, user_name, shoe_id, current_fav_id)
 
 # --- ADMIN PAGE ---
 def admin_dashboard():
     st.title("Admin Dashboard 🛠️")
     
-    tabs = st.tabs(["📤 Upload Photos", "🗑️ Manage Images", "📊 Stats"])
+    tabs = st.tabs(["📤 Upload", "🗑️ Manage Images", "👥 User Responses", "📊 Stats"])
     
     # TAB 1: UPLOAD
     with tabs[0]:
         st.subheader("Bulk Upload")
-        st.info("Drag and drop multiple files here. They will be saved immediately.")
         uploaded_files = st.file_uploader("Choose photos", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'webp'])
-        
         if uploaded_files:
             if st.button(f"Save {len(uploaded_files)} Photos"):
                 count = save_uploaded_files(uploaded_files)
                 st.success(f"Saved {count} images!")
                 st.rerun()
 
-    # TAB 2: MANAGE / DELETE
+    # TAB 2: MANAGE IMAGES
     with tabs[1]:
-        st.subheader("Manage Gallery")
-        
-        # Delete All Section
-        with st.expander("⚠️ Danger Zone: Delete All"):
-            st.warning("This will delete ALL images and ALL votes forever.")
-            if st.button("🗑️ DELETE EVERYTHING", type="primary"):
-                delete_all_shoes()
-                st.success("All data wiped.")
+        col_head_1, col_head_2 = st.columns([3, 1])
+        with col_head_1:
+            st.subheader("Gallery Management")
+        with col_head_2:
+            if st.button("🚨 DELETE ALL IMAGES", type="primary"):
+                delete_all_images()
                 st.rerun()
-        
-        st.divider()
 
         conn = get_db()
         all_shoes = pd.read_sql("SELECT * FROM shoes", conn)
@@ -174,55 +180,90 @@ def admin_dashboard():
         if all_shoes.empty:
             st.warning("No images found.")
         else:
-            # --- PAGINATION LOGIC ---
-            if "page_number" not in st.session_state:
-                st.session_state.page_number = 0
-
-            total_pages = max(1, (len(all_shoes) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+            # Pagination Logic
+            total_items = len(all_shoes)
+            total_pages = max(1, (total_items - 1) // ITEMS_PER_PAGE + 1)
             
-            # Ensure page number is valid
-            if st.session_state.page_number >= total_pages:
-                st.session_state.page_number = total_pages - 1
-
-            # Slice the dataframe for current page
-            start_idx = st.session_state.page_number * ITEMS_PER_PAGE
+            if 'admin_page' not in st.session_state:
+                st.session_state.admin_page = 1
+                
+            col_p1, col_p2, col_p3 = st.columns([1, 2, 1])
+            with col_p1:
+                if st.button("Previous") and st.session_state.admin_page > 1:
+                    st.session_state.admin_page -= 1
+                    st.rerun()
+            with col_p2:
+                st.write(f"Page {st.session_state.admin_page} of {total_pages}")
+            with col_p3:
+                if st.button("Next") and st.session_state.admin_page < total_pages:
+                    st.session_state.admin_page += 1
+                    st.rerun()
+            
+            # Slice Data
+            start_idx = (st.session_state.admin_page - 1) * ITEMS_PER_PAGE
             end_idx = start_idx + ITEMS_PER_PAGE
-            current_batch = all_shoes.iloc[start_idx:end_idx]
+            page_shoes = all_shoes.iloc[start_idx:end_idx]
 
-            # Display Batch
-            st.write(f"Showing page {st.session_state.page_number + 1} of {total_pages}")
-            
-            cols = st.columns(4)
-            for idx, row in current_batch.iterrows():
-                with cols[idx % 4]:
+            cols = st.columns(5) # 5 cols grid
+            for idx, row in page_shoes.iterrows():
+                with cols[idx % 5]:
                     st.container(border=True)
                     img_path = os.path.join(IMAGE_FOLDER, row['filename'])
-                    
                     if os.path.exists(img_path):
-                        st.image(img_path, use_container_width=True)
-                    else:
-                        st.error("File missing")
-                        
+                        st.image(img_path)
                     st.caption(f"ID: {row['id']}")
-                    if st.button("🗑️ Delete", key=f"del_{row['id']}", type="secondary"):
+                    if st.button("Del", key=f"del_{row['id']}"):
                         delete_shoe(row['id'], row['filename'])
                         st.rerun()
 
-            # Pagination Controls
-            st.divider()
-            c_prev, c_mid, c_next = st.columns([1, 2, 1])
-            
-            if c_prev.button("⬅️ Previous") and st.session_state.page_number > 0:
-                st.session_state.page_number -= 1
-                st.rerun()
-            
-            if c_next.button("Next ➡️") and st.session_state.page_number < total_pages - 1:
-                st.session_state.page_number += 1
-                st.rerun()
-
-    # TAB 3: STATS
+    # TAB 3: USER RESPONSES
     with tabs[2]:
-        st.subheader("Live Results")
+        st.subheader("User Responses Database")
+        conn = get_db()
+        # Fetch raw votes
+        votes_df = pd.read_sql("SELECT user_name, user_email, shoe_id, upvoted, is_favorite FROM votes", conn)
+        conn.close()
+
+        if not votes_df.empty:
+            # Pivot table for better viewing: One row per user
+            # This is complex because users vote on many items. 
+            # Simplified View: List of Users and their Action count
+            
+            user_summary = votes_df.groupby(['user_name', 'user_email']).agg({
+                'upvoted': 'sum',
+                'is_favorite': 'sum'
+            }).reset_index()
+            
+            st.dataframe(user_summary)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                # Export to Excel
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    votes_df.to_excel(writer, index=False, sheet_name='Raw Data')
+                    user_summary.to_excel(writer, index=False, sheet_name='Summary')
+                
+                st.download_button(
+                    label="📥 Download as Excel",
+                    data=buffer.getvalue(),
+                    file_name="shoe_votes.xlsx",
+                    mime="application/vnd.ms-excel"
+                )
+
+            with c2:
+                # Delete specific user
+                user_to_del = st.selectbox("Select User to Delete", user_summary['user_email'].unique())
+                if st.button(f"Delete responses from {user_to_del}"):
+                    delete_user_response(user_to_del)
+                    st.success("Deleted.")
+                    st.rerun()
+        else:
+            st.info("No responses yet.")
+
+    # TAB 4: STATS
+    with tabs[3]:
+        st.subheader("Live Stats")
         conn = get_db()
         query = """
         SELECT s.id, s.filename, 
@@ -238,28 +279,24 @@ def admin_dashboard():
         conn.close()
         
         if not stats.empty:
-            st.dataframe(stats)
             st.bar_chart(stats.set_index('id')['ups'])
-        else:
-            st.info("No data yet.")
+            st.dataframe(stats)
 
 # --- FOLKS PAGE ---
 def folks_gallery():
     user = st.session_state['user_id']
-    st.title("👟 Shoe Voting Gallery")
+    user_name = st.session_state['user_name']
+    st.title(f"Welcome, {user_name}!")
     
-    with st.expander("ℹ️ Click for Help"):
-        st.markdown("Use **👍 (Like)** for good shoes and **❤️ (Favorite)** for the BEST one.")
-
     conn = get_db()
     
-    # Get User Status
+    # User Votes
     my_votes = pd.read_sql("SELECT * FROM votes WHERE user_email = ?", conn, params=(user,))
     my_ups = my_votes[my_votes['upvoted'] == 1]['shoe_id'].tolist()
     fav_row = my_votes[my_votes['is_favorite'] == 1]
     my_fav_id = fav_row.iloc[0]['shoe_id'] if not fav_row.empty else None
 
-    # Get Shoes Sorted
+    # Get Shoes
     query = """
     SELECT s.id, s.filename, 
            COALESCE(SUM(v.is_favorite), 0) as total_favs,
@@ -276,31 +313,55 @@ def folks_gallery():
         st.warning("Gallery is empty.")
         return
 
-    cols = st.columns(3)
-    for idx, row in shoes.iterrows():
+    # Pagination for Folks
+    total_items = len(shoes)
+    total_pages = max(1, (total_items - 1) // ITEMS_PER_PAGE + 1)
+    
+    if 'folk_page' not in st.session_state:
+        st.session_state.folk_page = 1
+        
+    # Slicing
+    start_idx = (st.session_state.folk_page - 1) * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+    page_shoes = shoes.iloc[start_idx:end_idx]
+
+    # Grid Display
+    cols = st.columns(5) # 5 items per row
+    for idx, row in page_shoes.iterrows():
         sid = row['id']
         fname = row['filename']
         img_path = os.path.join(IMAGE_FOLDER, fname)
         
-        # Calculate State
         is_up = sid in my_ups
         is_fav = (sid == my_fav_id)
         
-        with cols[idx % 3]:
+        with cols[idx % 5]:
             st.container(border=True)
             if os.path.exists(img_path):
-                st.image(img_path, use_container_width=True)
-            else:
-                st.error("Image not found")
+                st.image(img_path)
             
-            st.caption(f"Shoe #{sid}")
+            st.caption(f"#{sid}")
             c1, c2 = st.columns(2)
             
-            if c1.button(f"{'👍 Liked' if is_up else '👍 Like'}", key=f"u_{sid}", type="primary" if is_up else "secondary", use_container_width=True):
-                toggle_upvote(user, sid, 1 if is_up else 0)
+            if c1.button(f"{'👍' if is_up else 'Like'}", key=f"u_{sid}", type="primary" if is_up else "secondary"):
+                toggle_upvote(user, user_name, sid, 1 if is_up else 0)
                 
-            if c2.button(f"{'❤️ Fav' if is_fav else '🤍 Fav'}", key=f"f_{sid}", type="primary" if is_fav else "secondary", use_container_width=True):
-                handle_favorite_click(user, sid, my_fav_id)
+            if c2.button(f"{'❤️' if is_fav else 'Fav'}", key=f"f_{sid}", type="primary" if is_fav else "secondary"):
+                handle_favorite_click(user, user_name, sid, my_fav_id)
+
+    # Navigation Buttons
+    st.divider()
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c1:
+        if st.button("⬅️ Previous") and st.session_state.folk_page > 1:
+            st.session_state.folk_page -= 1
+            st.rerun()
+    with c2:
+        st.markdown(f"<h4 style='text-align: center;'>Page {st.session_state.folk_page} of {total_pages}</h4>", unsafe_allow_html=True)
+    with c3:
+        if st.button("Next ➡️") and st.session_state.folk_page < total_pages:
+            st.session_state.folk_page += 1
+            st.rerun()
 
 # --- LOGIN & MAIN ---
 def login():
@@ -317,14 +378,12 @@ def login():
                         st.session_state.update({'user_role': 'folk', 'user_id': email, 'user_name': name})
                         st.rerun()
             with tabs[1]:
-                aid = st.text_input("Admin ID") 
+                aid = st.text_input("ID")
                 apass = st.text_input("Pass", type="password")
                 if st.button("Login"):
                     if aid == "AK1130" and apass == "3110":
                         st.session_state.update({'user_role': 'admin', 'user_id': 'ADMIN', 'user_name': 'Admin'})
                         st.rerun()
-                    else:
-                        st.error("Invalid Credentials")
 
 def main():
     init_db()
