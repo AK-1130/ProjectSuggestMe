@@ -2,11 +2,13 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import shutil
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Shoe Selection Pro", layout="wide")
-DB_FILE = "shoes_v3.db"
+DB_FILE = "shoes_v4.db"
 IMAGE_FOLDER = "images"
+ITEMS_PER_PAGE = 10
 
 # Ensure local image directory exists
 if not os.path.exists(IMAGE_FOLDER):
@@ -53,20 +55,39 @@ def save_uploaded_files(uploaded_files):
 def delete_shoe(shoe_id, filename):
     conn = get_db()
     c = conn.cursor()
-    
-    # 1. Delete from DB
     c.execute("DELETE FROM shoes WHERE id = ?", (shoe_id,))
     c.execute("DELETE FROM votes WHERE shoe_id = ?", (shoe_id,))
     conn.commit()
     conn.close()
     
-    # 2. Delete file from disk (try/except in case file is missing)
     try:
         file_path = os.path.join(IMAGE_FOLDER, filename)
         if os.path.exists(file_path):
             os.remove(file_path)
     except Exception as e:
         st.error(f"Error deleting file: {e}")
+
+def delete_all_shoes():
+    conn = get_db()
+    c = conn.cursor()
+    # Clear Tables
+    c.execute("DELETE FROM shoes")
+    c.execute("DELETE FROM votes")
+    # Reset ID counters
+    c.execute("DELETE FROM sqlite_sequence WHERE name='shoes'")
+    conn.commit()
+    conn.close()
+    
+    # Clear Folder
+    for filename in os.listdir(IMAGE_FOLDER):
+        file_path = os.path.join(IMAGE_FOLDER, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+        except Exception as e:
+            st.error(f"Failed to delete {file_path}. Reason: {e}")
 
 # --- VOTING LOGIC ---
 @st.dialog("Change Favorite Shoe?")
@@ -135,6 +156,17 @@ def admin_dashboard():
     # TAB 2: MANAGE / DELETE
     with tabs[1]:
         st.subheader("Manage Gallery")
+        
+        # Delete All Section
+        with st.expander("⚠️ Danger Zone: Delete All"):
+            st.warning("This will delete ALL images and ALL votes forever.")
+            if st.button("🗑️ DELETE EVERYTHING", type="primary"):
+                delete_all_shoes()
+                st.success("All data wiped.")
+                st.rerun()
+        
+        st.divider()
+
         conn = get_db()
         all_shoes = pd.read_sql("SELECT * FROM shoes", conn)
         conn.close()
@@ -142,29 +174,56 @@ def admin_dashboard():
         if all_shoes.empty:
             st.warning("No images found.")
         else:
-            # Display in grid for deletion
+            # --- PAGINATION LOGIC ---
+            if "page_number" not in st.session_state:
+                st.session_state.page_number = 0
+
+            total_pages = max(1, (len(all_shoes) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+            
+            # Ensure page number is valid
+            if st.session_state.page_number >= total_pages:
+                st.session_state.page_number = total_pages - 1
+
+            # Slice the dataframe for current page
+            start_idx = st.session_state.page_number * ITEMS_PER_PAGE
+            end_idx = start_idx + ITEMS_PER_PAGE
+            current_batch = all_shoes.iloc[start_idx:end_idx]
+
+            # Display Batch
+            st.write(f"Showing page {st.session_state.page_number + 1} of {total_pages}")
+            
             cols = st.columns(4)
-            for idx, row in all_shoes.iterrows():
+            for idx, row in current_batch.iterrows():
                 with cols[idx % 4]:
                     st.container(border=True)
                     img_path = os.path.join(IMAGE_FOLDER, row['filename'])
                     
-                    # specific check if file exists to avoid error on missing files
                     if os.path.exists(img_path):
                         st.image(img_path, use_container_width=True)
                     else:
                         st.error("File missing")
                         
                     st.caption(f"ID: {row['id']}")
-                    if st.button("🗑️ Delete", key=f"del_{row['id']}", type="primary"):
+                    if st.button("🗑️ Delete", key=f"del_{row['id']}", type="secondary"):
                         delete_shoe(row['id'], row['filename'])
                         st.rerun()
+
+            # Pagination Controls
+            st.divider()
+            c_prev, c_mid, c_next = st.columns([1, 2, 1])
+            
+            if c_prev.button("⬅️ Previous") and st.session_state.page_number > 0:
+                st.session_state.page_number -= 1
+                st.rerun()
+            
+            if c_next.button("Next ➡️") and st.session_state.page_number < total_pages - 1:
+                st.session_state.page_number += 1
+                st.rerun()
 
     # TAB 3: STATS
     with tabs[2]:
         st.subheader("Live Results")
         conn = get_db()
-        # Join tables
         query = """
         SELECT s.id, s.filename, 
             COALESCE(SUM(v.upvoted), 0) as ups, 
@@ -258,13 +317,14 @@ def login():
                         st.session_state.update({'user_role': 'folk', 'user_id': email, 'user_name': name})
                         st.rerun()
             with tabs[1]:
-                if st.button("Login (AK1130)"): # Simplified for speed
-                    # In real usage, uncomment text inputs below
-                    # aid = st.text_input("ID") 
-                    # apass = st.text_input("Pass", type="password")
-                    # if aid == "AK1130" and apass == "3110":
-                    st.session_state.update({'user_role': 'admin', 'user_id': 'ADMIN', 'user_name': 'Admin'})
-                    st.rerun()
+                aid = st.text_input("Admin ID") 
+                apass = st.text_input("Pass", type="password")
+                if st.button("Login"):
+                    if aid == "AK1130" and apass == "3110":
+                        st.session_state.update({'user_role': 'admin', 'user_id': 'ADMIN', 'user_name': 'Admin'})
+                        st.rerun()
+                    else:
+                        st.error("Invalid Credentials")
 
 def main():
     init_db()
